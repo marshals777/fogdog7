@@ -1,1 +1,0 @@
-ALTER TYPE "Currency" ADD VALUE 'USDT';
