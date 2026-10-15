@@ -1,0 +1,487 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CUSTOMER
+  ADMIN
+}
+
+enum Locale {
+  uk
+  ru
+  en
+}
+
+enum Currency {
+  USD
+  UAH
+  USDT
+}
+
+enum ProductKind {
+  UNIQUE
+  BULK
+  SERVICE
+}
+
+enum FulfillmentMode {
+  INVENTORY
+  PROVIDER
+  MANUAL
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  FULFILLING
+  COMPLETED
+  CANCELLED
+  REFUNDED
+  NEEDS_REVIEW
+}
+
+enum Channel {
+  WEB
+  TMA
+  BOT
+}
+
+enum InventoryStatus {
+  AVAILABLE
+  RESERVED
+  SOLD
+  DISABLED
+}
+
+enum FulfillmentStatus {
+  PENDING
+  PROCESSING
+  DELIVERED
+  FAILED
+}
+
+enum TransactionKind {
+  DEPOSIT
+  PURCHASE
+  REFUND
+  ADJUSTMENT
+}
+
+enum TransactionStatus {
+  PENDING
+  POSTED
+  FAILED
+}
+
+enum PaymentProvider {
+  CRYPTO_PAY
+  MONO
+  FONDY
+  STRIPE
+  TELEGRAM_STARS
+}
+
+model User {
+  id              String          @id @default(cuid())
+  telegramId      BigInt?         @unique
+  email           String?         @unique
+  emailVerifiedAt DateTime?
+  passwordHash    String?
+  onboardingStartedAt DateTime?
+  onboardingCompletedAt DateTime?
+  lastActiveAt DateTime @default(now())
+  avatarBytes Bytes?
+  avatarUpdatedAt DateTime?
+  displayName     String?
+  locale          Locale          @default(uk)
+  role            Role            @default(CUSTOMER)
+  sessions        UserSession[]
+  payments        PaymentIntent[]
+  adminSessions   AdminSession[]
+  adminAuditLogs  AdminAuditLog[]
+  wallets         Wallet[]
+  orders          Order[]         @relation("Buyer")
+  assignedItems   OrderItem[]     @relation("Assignee")
+  transactions    Transaction[]
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@index([role, lastActiveAt])
+}
+
+model Wallet {
+  id           String        @id @default(cuid())
+  userId       String
+  user         User          @relation(fields: [userId], references: [id], onDelete: Restrict)
+  currency     Currency
+  balance      String       @default("0")
+  version      Int           @default(0)
+  transactions Transaction[]
+
+  @@unique([userId, currency])
+}
+
+model Category {
+  id           String                @id @default(cuid())
+  slug         String                @unique
+  parentId     String?
+  parent       Category?             @relation("Tree", fields: [parentId], references: [id], onDelete: Restrict)
+  children     Category[]            @relation("Tree")
+  translations CategoryTranslation[]
+  products     Product[]
+  position     Int                   @default(0)
+  active       Boolean               @default(true)
+}
+
+model CategoryTranslation {
+  categoryId  String
+  locale      Locale
+  title       String
+  description String?
+  category    Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@id([categoryId, locale])
+}
+
+model Product {
+  id                String               @id @default(cuid())
+  slug              String               @unique
+  categoryId        String
+  category          Category             @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  brandAssetId      String?
+  brandAsset        BrandAsset?          @relation(fields: [brandAssetId], references: [id], onDelete: Restrict)
+  version           Int                  @default(0)
+  verificationGroup String?
+  translations      ProductTranslation[]
+  kind              ProductKind
+  fulfillmentMode   FulfillmentMode
+  price             String              
+  currency          Currency             @default(USD)
+  imageUrl          String?
+  active            Boolean              @default(false)
+  provider          String?
+  providerProductId String?
+  // Public filter attributes only; never credentials or API tokens.
+  attributes        Json?
+  minQuantity       Int                  @default(1)
+  maxQuantity       Int                  @default(1)
+  inventory         InventoryItem[]
+  orderItems        OrderItem[]
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+
+  @@unique([provider, providerProductId])
+  @@index([categoryId, active, price])
+}
+
+model ProductTranslation {
+  productId   String
+  locale      Locale
+  title       String
+  description String
+  product     Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@id([productId, locale])
+}
+
+model InventoryItem {
+  id               String          @id @default(cuid())
+  productId        String
+  product          Product         @relation(fields: [productId], references: [id], onDelete: Restrict)
+  status           InventoryStatus @default(AVAILABLE)
+  // Encrypt server-side using a key outside the DB; never expose in catalog DTOs.
+  encryptedPayload String
+  orderItemId      String?
+  orderItem        OrderItem?      @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+  reservedUntil    DateTime?
+  soldAt           DateTime?
+  createdAt        DateTime        @default(now())
+
+  @@index([productId, status])
+  @@index([status, reservedUntil])
+}
+
+model Order {
+  id             String        @id @default(cuid())
+  userId         String
+  user           User          @relation("Buyer", fields: [userId], references: [id], onDelete: Restrict)
+  status         OrderStatus   @default(PENDING)
+  channel        Channel
+  currency       Currency
+  total          String       
+  // Client retries reuse this key, scoped to the authenticated buyer.
+  idempotencyKey String
+  payments       PaymentIntent[]
+  requestHash    String?
+  items          OrderItem[]
+  transactions   Transaction[]
+  paidAt         DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@unique([userId, idempotencyKey])
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+}
+
+model OrderItem {
+  id                String            @id @default(cuid())
+  orderId           String
+  order             Order             @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  productId         String
+  product           Product           @relation(fields: [productId], references: [id], onDelete: Restrict)
+  requestData       Json?
+  fulfillmentJob    FulfillmentJob?
+  titleSnapshot     String
+  quantity          Int
+  lineTotal         String           @default("0")
+  unitPrice         String           
+  fulfillmentMode   FulfillmentMode
+  fulfillmentStatus FulfillmentStatus @default(PENDING)
+  provider          String?
+  providerOrderId   String?
+  assignedToId      String?
+  assignedTo        User?             @relation("Assignee", fields: [assignedToId], references: [id], onDelete: Restrict)
+  encryptedDelivery String?
+  deliveredAt       DateTime?
+  inventory         InventoryItem[]
+  smmJob            SmmJob?
+
+  @@unique([provider, providerOrderId])
+  @@index([fulfillmentMode, fulfillmentStatus])
+}
+
+model Transaction {
+  id                String            @id @default(cuid())
+  userId            String
+  user              User              @relation(fields: [userId], references: [id], onDelete: Restrict)
+  walletId          String
+  wallet            Wallet            @relation(fields: [walletId], references: [id], onDelete: Restrict)
+  orderId           String?
+  order             Order?            @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  kind              TransactionKind
+  status            TransactionStatus @default(PENDING)
+  // Signed delta: deposits/refunds > 0, purchases < 0. Currency = wallet.currency.
+  amount            String           
+  idempotencyKey    String            @unique
+  provider          PaymentProvider?
+  providerReference String?
+  postedAt          DateTime?
+  createdAt         DateTime          @default(now())
+
+  @@unique([provider, providerReference])
+  @@index([walletId, createdAt])
+}
+
+enum SmmJobState {
+  QUEUED
+  PREPARING
+  SENDING
+  RUNNING
+  COMPLETED
+  PARTIAL
+  CANCELED
+  FAILED
+  UNKNOWN
+}
+
+model SmmJob {
+  id                  String      @id @default(cuid())
+  orderItemId         String      @unique
+  orderItem           OrderItem   @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+  serviceKey          String
+  providerServiceId   String
+  providerFingerprint String
+  targetLink          String
+  quantity            Int
+  maxCharge           String     
+  providerCurrency    String
+  providerOrderId     String?     @unique
+  state               SmmJobState @default(QUEUED)
+  attempts            Int         @default(0)
+  runAt               DateTime    @default(now())
+  leaseUntil          DateTime?
+  remaining           Int?
+  lastErrorCode       String?
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
+
+  @@index([state, runAt])
+}
+
+model BrandAsset {
+  id        String    @id
+  name      String
+  imageUrl  String
+  pngBytes  Bytes?
+  color     String    @default("#a78bfa")
+  group     String    @default("exchange")
+  sourceUrl String?
+  products  Product[]
+  createdAt DateTime  @default(now())
+}
+
+model AdminSession {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model AdminLoginBucket {
+  id        String   @id
+  attempts  Int      @default(0)
+  expiresAt DateTime
+
+  @@index([expiresAt])
+}
+
+model AdminAuditLog {
+  id        String   @id @default(cuid())
+  actorId   String
+  actor     User     @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  action    String
+  entityId  String
+  before    Json?
+  after     Json?
+  createdAt DateTime @default(now())
+
+  @@index([entityId, createdAt])
+  @@index([createdAt])
+}
+
+model UserSession {
+  id String @id @default(cuid())
+  tokenHash String @unique
+  userId String
+  user User @relation(fields:[userId], references:[id], onDelete:Cascade)
+  channel Channel @default(WEB)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+enum PaymentState {
+  CREATING
+  PENDING
+  PAID
+  FAILED
+  UNKNOWN
+  REFUNDING
+  REFUNDED
+}
+model PaymentIntent {
+  id String @id @default(cuid())
+  userId String
+  user User @relation(fields:[userId], references:[id], onDelete:Restrict)
+  orderId String?
+  order Order? @relation(fields:[orderId], references:[id], onDelete:Restrict)
+  provider PaymentProvider
+  purpose String
+  state PaymentState @default(CREATING)
+  walletCurrency Currency
+  creditAmount String 
+  expectedAmount String
+  expectedCurrency String
+  providerReference String?
+  chargeId String? @unique
+  preCheckoutId String? @unique
+  paymentUrl String?
+  idempotencyKey String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([userId,idempotencyKey])
+  @@unique([provider,providerReference])
+  @@index([state,expiresAt])
+}
+model FulfillmentJob {
+  id String @id @default(cuid())
+  orderItemId String @unique
+  orderItem OrderItem @relation(fields:[orderItemId], references:[id], onDelete:Restrict)
+  state SmmJobState @default(QUEUED)
+  attempts Int @default(0)
+  runAt DateTime @default(now())
+  leaseUntil DateTime?
+  lastErrorCode String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([state,runAt])
+}
+model MarketplaceReservation {
+  itemId String @id
+  orderItemId String @unique
+  expiresAt DateTime?
+  createdAt DateTime @default(now())
+}
+model Notification {
+  id String @id @default(cuid())
+  telegramId BigInt
+  orderId String?
+  kind String
+  text String
+  deduplicationKey String @unique
+  deliveredAt DateTime?
+  leaseUntil DateTime?
+  attempts Int @default(0)
+  lastErrorCode String?
+  createdAt DateTime @default(now())
+  @@index([deliveredAt,createdAt])
+}
+
+model CartHandoff {
+  tokenHash String @id
+  entries Json
+  locale Locale
+  claimedById String?
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  @@index([expiresAt])
+}
+
+model ServiceHeartbeat {
+  id            String   @id
+  lastSeenAt    DateTime @default(now())
+  lastSuccessAt DateTime?
+  lastErrorCode String?
+}
+
+model NftWalletProof {
+  userId String @id
+  payload String @unique
+  address String?
+  expiresAt DateTime
+  @@index([expiresAt])
+}
+model NftPurchase {
+  id String @id @default(cuid())
+  userId String
+  nftAddress String
+  walletAddress String
+  previousOwner String
+  name String
+  baseNano String
+  feeNano String
+  transaction Json
+  state String @default("PREPARED")
+  expiresAt DateTime
+  deliveredAt DateTime?
+  feeTxHash String? @unique
+  deliveryTxHash String? @unique
+  feePendingUntil DateTime?
+  createdAt DateTime @default(now())
+  @@index([userId,createdAt])
+}
